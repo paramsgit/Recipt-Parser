@@ -20,7 +20,7 @@ I also separated purchasable line items from accounting fields like subtotal, ta
 
 ## Where did you use an LLM, and for what?
 
-## I used Claude and ChatGPT mainly for prompt iteration, response-shape refinement, and thinking through edge cases around malformed receipt data. I used GitHub Copilot selectively for repetitive setup work like database scaffolding and small utility functions. The overall architecture, API flow, correction UX decisions, provider abstraction, and application structure were planned and implemented by me.
+ I used Claude and ChatGPT mainly for prompt iteration, response-shape refinement, and thinking through edge cases around malformed receipt data. I used GitHub Copilot selectively for repetitive setup work like database scaffolding and small utility functions. The overall architecture, API flow, correction UX decisions, provider abstraction, and application structure were planned and implemented by me.
 
 ## What would you do with another week?
 
