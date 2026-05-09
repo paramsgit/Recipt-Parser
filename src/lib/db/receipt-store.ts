@@ -1,6 +1,4 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
+import { createClient, type Client } from "@libsql/client";
 
 export type ReceiptParseRow = {
   id: string;
@@ -10,10 +8,7 @@ export type ReceiptParseRow = {
   updatedAt: string | null;
 };
 
-type SqlState = {
-  db: SqlJsDatabase;
-  dbFilePath: string;
-};
+type SqlState = { client: Client };
 
 declare global {
   // eslint-disable-next-line no-var
@@ -24,12 +19,16 @@ declare global {
   var __receiptSqlInit: Promise<SqlState> | undefined;
 }
 
-function getDbFilePath() {
-  return path.join(process.cwd(), "data", "receipts.sqlite");
+function getDbUrl(): string {
+  return (
+    process.env.TURSO_DATABASE_URL ??
+    process.env.LIBSQL_DATABASE_URL ??
+    "libsql://receipt-afsarbande002.aws-ap-south-1.turso.io"
+  );
 }
 
-async function ensureDirExists(filePath: string) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
+function getAuthToken(): string | undefined {
+  return process.env.TURSO_AUTH_TOKEN ?? process.env.LIBSQL_AUTH_TOKEN;
 }
 
 async function loadOrCreateDb(): Promise<SqlState> {
@@ -37,23 +36,12 @@ async function loadOrCreateDb(): Promise<SqlState> {
   if (globalThis.__receiptSqlInit) return globalThis.__receiptSqlInit;
 
   globalThis.__receiptSqlInit = (async () => {
-    const dbFilePath = getDbFilePath();
-    await ensureDirExists(dbFilePath);
-
-    const SQL = await initSqlJs({
-      locateFile: (file) =>
-        path.join(process.cwd(), "node_modules", "sql.js", "dist", file),
+    const client = createClient({
+      url: getDbUrl(),
+      authToken: getAuthToken(),
     });
 
-    let db: SqlJsDatabase;
-    try {
-      const file = await fs.readFile(dbFilePath);
-      db = new SQL.Database(file);
-    } catch {
-      db = new SQL.Database();
-    }
-
-    db.run(`
+    await client.execute(`
       CREATE TABLE IF NOT EXISTS receipt_parses (
         id TEXT PRIMARY KEY,
         filename TEXT NOT NULL,
@@ -65,12 +53,12 @@ async function loadOrCreateDb(): Promise<SqlState> {
 
     // Backwards-compatible migration for older DBs.
     try {
-      db.run(`ALTER TABLE receipt_parses ADD COLUMN updated_at TEXT;`);
+      await client.execute(`ALTER TABLE receipt_parses ADD COLUMN updated_at TEXT;`);
     } catch {
-      // Column already exists (or SQLite doesn't need migration).
+      // Column already exists.
     }
 
-    const state: SqlState = { db, dbFilePath };
+    const state: SqlState = { client };
     globalThis.__receiptSqlState = state;
     globalThis.__receiptSqlWriteChain ??= Promise.resolve();
     return state;
@@ -79,32 +67,31 @@ async function loadOrCreateDb(): Promise<SqlState> {
   return globalThis.__receiptSqlInit;
 }
 
-async function persistDb(state: SqlState) {
-  const exported = state.db.export();
-  await fs.writeFile(state.dbFilePath, Buffer.from(exported));
+function getRowValue(row: unknown, key: string): unknown {
+  if (!row || typeof row !== "object") return undefined;
+  return (row as Record<string, unknown>)[key];
 }
 
-function rowFromSelect(res: ReturnType<SqlJsDatabase["exec"]>): ReceiptParseRow | null {
-  const first = res[0];
-  if (!first) return null;
-  const idx = new Map(first.columns.map((c, i) => [c, i]));
-  const v = first.values[0];
-  if (!v) return null;
+function rowFromSelect(rows: Array<Record<string, unknown>>): ReceiptParseRow | null {
+  const row = rows[0];
+  if (!row) return null;
 
-  const modelResponseRaw = v[idx.get("model_response") ?? -1];
+  const modelResponseRaw = getRowValue(row, "model_response");
   const modelResponse =
     typeof modelResponseRaw === "string" ? safeJsonParse(modelResponseRaw) : null;
 
+  const updatedAtRaw = getRowValue(row, "updated_at");
+  const updatedAt =
+    updatedAtRaw === null || typeof updatedAtRaw === "undefined"
+      ? null
+      : String(updatedAtRaw);
+
   return {
-    id: String(v[idx.get("id") ?? -1]),
-    filename: String(v[idx.get("filename") ?? -1]),
+    id: String(getRowValue(row, "id")),
+    filename: String(getRowValue(row, "filename")),
     modelResponse,
-    createdAt: String(v[idx.get("created_at") ?? -1]),
-    updatedAt:
-      v[idx.get("updated_at") ?? -1] === null ||
-      typeof v[idx.get("updated_at") ?? -1] === "undefined"
-        ? null
-        : String(v[idx.get("updated_at") ?? -1]),
+    createdAt: String(getRowValue(row, "created_at")),
+    updatedAt,
   };
 }
 
@@ -126,13 +113,11 @@ export async function storeReceiptParse(args: {
 
   const run = async () => {
     const modelResponseJson = JSON.stringify(args.modelResponse);
-    state.db.run(
-      `INSERT INTO receipt_parses (id, filename, model_response, created_at)
-       VALUES (?, ?, ?, ?)`,
-      [args.id, args.filename, modelResponseJson, args.createdAt],
-    );
-
-    await persistDb(state);
+    await state.client.execute({
+      sql: `INSERT INTO receipt_parses (id, filename, model_response, created_at)
+            VALUES (?, ?, ?, ?)`,
+      args: [args.id, args.filename, modelResponseJson, args.createdAt],
+    });
 
     return {
       id: args.id,
@@ -161,23 +146,22 @@ export async function updateReceiptParse(args: {
 
   const run = async () => {
     const modelResponseJson = JSON.stringify(args.modelResponse);
-    state.db.run(
-      `UPDATE receipt_parses
-       SET model_response = ?, updated_at = ?
-       WHERE id = ?`,
-      [modelResponseJson, args.updatedAt, args.id],
-    );
+    await state.client.execute({
+      sql: `UPDATE receipt_parses
+            SET model_response = ?, updated_at = ?
+            WHERE id = ?`,
+      args: [modelResponseJson, args.updatedAt, args.id],
+    });
 
-    const selected = state.db.exec(
-      `SELECT id, filename, model_response, created_at, updated_at
-       FROM receipt_parses
-       WHERE id = ?
-       LIMIT 1`,
-      [args.id],
-    );
+    const selected = await state.client.execute({
+      sql: `SELECT id, filename, model_response, created_at, updated_at
+            FROM receipt_parses
+            WHERE id = ?
+            LIMIT 1`,
+      args: [args.id],
+    });
 
-    await persistDb(state);
-    return rowFromSelect(selected);
+    return rowFromSelect(selected.rows as Array<Record<string, unknown>>);
   };
 
   globalThis.__receiptSqlWriteChain ??= Promise.resolve();
