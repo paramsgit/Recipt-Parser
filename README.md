@@ -4,6 +4,8 @@
 
 I built a small full-stack receipt parser application using Next.js and TypeScript. The app allows a user to upload a receipt image, sends the image to a vision-capable LLM for extraction, and returns structured receipt data including merchant name, date, line items, subtotal, tax, discount, and total. The extracted data is shown in an editable UI where users can review and correct fields before saving. I also added confidence indicators for extracted fields to make the correction flow more usable.
 
+Live url: https://recipt-parser.vercel.app/
+
 ---
 
 ## What are the biggest tradeoffs you made, and why?
